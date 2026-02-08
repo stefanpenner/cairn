@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -113,9 +112,8 @@ func getDataDir() string {
 			return os.Args[i+1]
 		}
 	}
-	// Default
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cairn")
+	// Default: OS-specific data directory
+	return store.DefaultDataDir()
 }
 
 func hasFlag(args []string, flag string) bool {
@@ -247,13 +245,8 @@ func cmdStatus(s *store.Store, goalPath string, jsonOut bool) error {
 }
 
 func cmdSetStatus(s *store.Store, goalPath string, status store.GoalStatus, jsonOut bool) error {
-	g, err := s.LoadGoal(goalPath)
+	g, err := s.SetStatus(goalPath, status)
 	if err != nil {
-		return err
-	}
-
-	g.Status = status
-	if err := s.SaveGoal(g); err != nil {
 		return err
 	}
 

@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -10,7 +11,8 @@ import (
 
 // Store manages the filesystem-backed goal data.
 type Store struct {
-	Root string // e.g., ~/.cairn
+	Root       string // e.g., ~/Library/Application Support/cairn
+	GitEnabled bool
 }
 
 // NewStore creates a Store rooted at the given directory.
@@ -20,7 +22,50 @@ func NewStore(root string) (*Store, error) {
 	if err := os.MkdirAll(goalsDir, 0755); err != nil {
 		return nil, fmt.Errorf("creating goals directory: %w", err)
 	}
-	return &Store{Root: root}, nil
+	s := &Store{Root: root}
+	s.initGit()
+	return s, nil
+}
+
+// initGit initializes the data directory as a git repo if git is available.
+func (s *Store) initGit() {
+	if _, err := exec.LookPath("git"); err != nil {
+		return
+	}
+
+	gitDir := filepath.Join(s.Root, ".git")
+	if _, err := os.Stat(gitDir); err == nil {
+		s.GitEnabled = true
+		return
+	}
+
+	if err := exec.Command("git", "init", s.Root).Run(); err != nil {
+		return
+	}
+
+	// Create .gitignore
+	gitignore := filepath.Join(s.Root, ".gitignore")
+	if _, err := os.Stat(gitignore); os.IsNotExist(err) {
+		os.WriteFile(gitignore, []byte("*.swp\n*.swo\n*~\n.DS_Store\n"), 0644)
+	}
+
+	// Initial commit
+	exec.Command("git", "-C", s.Root, "add", "-A").Run()
+	exec.Command("git", "-C", s.Root, "commit", "-m", "init cairn data").Run()
+
+	s.GitEnabled = true
+}
+
+// Commit stages all changes and commits with the given message.
+// Fire-and-forget: git failures never break the user's workflow.
+func (s *Store) Commit(message string) {
+	if !s.GitEnabled {
+		return
+	}
+	exec.Command("git", "-C", s.Root, "add", "-A").Run()
+	if err := exec.Command("git", "-C", s.Root, "diff", "--cached", "--quiet").Run(); err != nil {
+		exec.Command("git", "-C", s.Root, "commit", "-m", message).Run()
+	}
 }
 
 // GoalsDir returns the path to the goals directory.
@@ -49,7 +94,11 @@ func (s *Store) LoadQueue() (*Queue, error) {
 func (s *Store) SaveQueue(q *Queue) error {
 	q.Updated = time.Now()
 	content := SerializeQueue(q)
-	return os.WriteFile(s.QueuePath(), []byte(content), 0644)
+	if err := os.WriteFile(s.QueuePath(), []byte(content), 0644); err != nil {
+		return err
+	}
+	s.Commit("update queue")
+	return nil
 }
 
 // LoadGoal reads a single goal from its directory path (relative to goals/).
@@ -241,6 +290,7 @@ func (s *Store) CreateGoal(parentPath, slug string) (*Goal, error) {
 		return nil, err
 	}
 
+	s.Commit("add goal: " + slug)
 	return goal, nil
 }
 
@@ -250,7 +300,11 @@ func (s *Store) DeleteGoal(goalPath string) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("goal %s not found", goalPath)
 	}
-	return os.RemoveAll(dir)
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	s.Commit("remove goal: " + goalPath)
+	return nil
 }
 
 // ToggleStatus cycles a goal through incomplete → in-progress → complete → incomplete.
@@ -272,6 +326,21 @@ func (s *Store) ToggleStatus(goalPath string) (*Goal, error) {
 	if err := s.SaveGoal(goal); err != nil {
 		return nil, err
 	}
+	s.Commit("mark " + goalPath + " " + string(goal.Status))
+	return goal, nil
+}
+
+// SetStatus sets a goal's status directly.
+func (s *Store) SetStatus(goalPath string, status GoalStatus) (*Goal, error) {
+	goal, err := s.LoadGoal(goalPath)
+	if err != nil {
+		return nil, err
+	}
+	goal.Status = status
+	if err := s.SaveGoal(goal); err != nil {
+		return nil, err
+	}
+	s.Commit("mark " + goalPath + " " + string(status))
 	return goal, nil
 }
 
@@ -286,6 +355,7 @@ func (s *Store) SetHorizon(goalPath string, horizon Horizon) (*Goal, error) {
 	if err := s.SaveGoal(goal); err != nil {
 		return nil, err
 	}
+	s.Commit("set " + goalPath + " horizon: " + string(horizon))
 	return goal, nil
 }
 
@@ -325,6 +395,7 @@ func (s *Store) AddNote(goalPath, text string) (*Goal, error) {
 	if err := s.SaveGoal(goal); err != nil {
 		return nil, err
 	}
+	s.Commit("note: " + goalPath)
 	return goal, nil
 }
 
@@ -390,7 +461,11 @@ func (s *Store) ReorderGoal(goalPath string, delta int) error {
 	siblings[idx], siblings[newIdx] = siblings[newIdx], siblings[idx]
 
 	// Save the updated order
-	return s.saveChildrenOrder(parentPath, siblings)
+	if err := s.saveChildrenOrder(parentPath, siblings); err != nil {
+		return err
+	}
+	s.Commit("reorder: " + goalPath)
+	return nil
 }
 
 // MoveGoal moves a goal directory to a new parent.
@@ -444,6 +519,13 @@ func (s *Store) MoveGoal(goalPath, newParentPath string) error {
 	// Add the goal to new parent's children_order
 	s.addToChildrenOrder(newParentPath, slug)
 
+	var newGoalDisplay string
+	if newParentPath == "" {
+		newGoalDisplay = "(root)"
+	} else {
+		newGoalDisplay = newParentPath
+	}
+	s.Commit("move " + goalPath + " → " + newGoalDisplay)
 	return nil
 }
 

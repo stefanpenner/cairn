@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/stefanpenner/cairn/pkg/store"
+	gsync "github.com/stefanpenner/cairn/pkg/sync"
 )
 
 // FileChangedMsg is sent when the file watcher detects changes.
@@ -68,6 +69,9 @@ type Model struct {
 	isEditing    bool
 	noteEditor   textarea.Model
 	editGoalPath string // path of the goal being edited
+
+	// External edit tracking
+	externalEditPath string
 
 	// Search state
 	isSearching    bool
@@ -151,6 +155,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case EditorFinishedMsg:
+		if m.externalEditPath != "" {
+			m.store.Commit("edit: " + m.externalEditPath)
+			m.externalEditPath = ""
+		}
 		m.reload()
 		return m, nil
 
@@ -219,6 +227,7 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					if err := m.store.SaveGoal(goal); err != nil {
 						m.setStatus("Error: " + err.Error())
 					} else {
+						m.store.Commit("rename: " + m.renameGoalPath)
 						m.setStatus("Renamed to: " + newTitle)
 						m.reload()
 					}
@@ -416,6 +425,7 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if item.IsSectionHeader {
 				break
 			}
+			m.externalEditPath = item.Goal.Path
 			return m, m.openEditor(item.Goal)
 		}
 
@@ -668,6 +678,8 @@ func (m *Model) saveInlineEdit() {
 	goal.Body = m.noteEditor.Value()
 	if err := m.store.SaveGoal(goal); err != nil {
 		m.setStatus("Save error: " + err.Error())
+	} else {
+		m.store.Commit("edit: " + m.editGoalPath)
 	}
 }
 
@@ -1083,26 +1095,7 @@ func (m *Model) openEditor(g *store.Goal) tea.Cmd {
 
 func (m Model) doSync() tea.Cmd {
 	return func() tea.Msg {
-		dir := m.store.Root
-		cmds := []struct {
-			name string
-			args []string
-		}{
-			{"git", []string{"-C", dir, "add", "-A"}},
-			{"git", []string{"-C", dir, "commit", "-m", "sync " + time.Now().Format("2006-01-02 15:04:05")}},
-			{"git", []string{"-C", dir, "pull", "--rebase"}},
-			{"git", []string{"-C", dir, "push"}},
-		}
-
-		for _, c := range cmds {
-			cmd := exec.Command(c.name, c.args...)
-			if err := cmd.Run(); err != nil {
-				// commit fails if nothing to commit — that's ok
-				if c.args[2] != "commit" {
-					return SyncDoneMsg{Err: err}
-				}
-			}
-		}
-		return SyncDoneMsg{}
+		err := gsync.SyncRepo(m.store.Root)
+		return SyncDoneMsg{Err: err}
 	}
 }
